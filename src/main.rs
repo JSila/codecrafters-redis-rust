@@ -1,33 +1,34 @@
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::thread;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
-    let mut threads = vec![];
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:6379").await?;
 
-    for _ in 0..4 {
-        let listener = listener.try_clone().unwrap();
-        threads.push(thread::spawn(move || {
-            let mut buf = [0; 512];
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(mut stream) => loop {
-                        let bytes_read = stream.read(&mut buf).unwrap();
-                        if bytes_read == 0 {
-                            break;
-                        }
-                        stream.write_all(b"+PONG\r\n").unwrap();
-                    },
-                    Err(e) => {
-                        eprintln!("error: {}", e);
-                    }
-                }
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                tokio::spawn(async move {
+                    handle_connection(stream).await.unwrap();
+                });
             }
-        }));
+            Err(e) => {
+                eprintln!("error: {}", e);
+            }
+        }
+    }
+}
+
+async fn handle_connection(mut stream: TcpStream) -> anyhow::Result<()> {
+    let mut buf = [0; 512];
+
+    loop {
+        let bytes_read = stream.read(&mut buf).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        stream.write(b"+PONG\r\n").await?;
     }
 
-    for t in threads {
-        t.join().unwrap();
-    }
+    Ok(())
 }

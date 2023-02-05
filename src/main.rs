@@ -38,22 +38,24 @@ async fn handle_connection(mut stream: TcpStream) -> anyhow::Result<()> {
 }
 
 fn handle_resp(buf: &[u8]) -> anyhow::Result<String> {
+    dbg!(std::str::from_utf8(buf));
+
     let request_value = Value::parse(buf)?;
 
-    // dbg!(&request_value);
+    dbg!(&request_value);
 
     let response_value = match request_value {
         Value::Array(a) => {
             let command = a.get(0);
             match command {
-                Some(Value::BulkString(s)) if s.eq("PING") => {
+                Some(Value::BulkString(s)) if s.to_lowercase().eq("ping") => {
                     Value::SimpleString("PONG".to_string())
                 }
-                Some(Value::BulkString(s)) if s.eq("ECHO") => {
+                Some(Value::BulkString(s)) if s.to_lowercase().eq("echo") => {
                     let args = a.get(1..);
                     match args {
                         None => Value::Error("".to_string()),
-                        Some(args) => Value::Array(args.to_vec()),
+                        Some(args) => args.first().unwrap().clone(),
                     }
                 }
                 None => Value::Error("".to_string()),
@@ -66,8 +68,8 @@ fn handle_resp(buf: &[u8]) -> anyhow::Result<String> {
         Value::SimpleString(_) => Value::Error("".to_string()),
     };
 
-    // dbg!(&response_value);
-    // dbg!(&response_value.to_resp());
+    dbg!(&response_value);
+    dbg!(&response_value.to_resp());
 
     Ok(response_value.to_resp())
 }

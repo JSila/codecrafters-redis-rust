@@ -1,16 +1,24 @@
+use std::collections::HashMap;
 use std::str::Split;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+
+type Db = Arc<Mutex<HashMap<String, String>>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
 
+    let db: Db = Default::default();
+
     loop {
+        let db = db.clone();
+
         match listener.accept().await {
             Ok((stream, _)) => {
                 tokio::spawn(async move {
-                    handle_connection(stream).await.unwrap();
+                    handle_connection(stream, db).await.unwrap();
                 });
             }
             Err(e) => {
@@ -20,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn handle_connection(mut stream: TcpStream) -> anyhow::Result<()> {
+async fn handle_connection(mut stream: TcpStream, db: Db) -> anyhow::Result<()> {
     let mut buf = [0; 512];
 
     loop {
@@ -29,7 +37,7 @@ async fn handle_connection(mut stream: TcpStream) -> anyhow::Result<()> {
             break;
         }
 
-        let output = handle_resp(&buf[..bytes_read])?;
+        let output = handle_resp(&buf[..bytes_read], &db)?;
 
         stream.write(&output.as_bytes()).await?;
     }
@@ -37,35 +45,50 @@ async fn handle_connection(mut stream: TcpStream) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_resp(buf: &[u8]) -> anyhow::Result<String> {
-    dbg!(std::str::from_utf8(buf));
+fn handle_resp(buf: &[u8], db: &Db) -> anyhow::Result<String> {
+    dbg!(std::str::from_utf8(buf).unwrap());
 
     let request_value = Value::parse(buf)?;
 
     dbg!(&request_value);
 
-    let response_value = match request_value {
-        Value::Array(a) => {
-            let command = a.get(0);
-            match command {
-                Some(Value::BulkString(s)) if s.to_lowercase().eq("ping") => {
-                    Value::SimpleString("PONG".to_string())
-                }
-                Some(Value::BulkString(s)) if s.to_lowercase().eq("echo") => {
-                    let args = a.get(1..);
-                    match args {
-                        None => Value::Error("".to_string()),
-                        Some(args) => args.first().unwrap().clone(),
+    let response_value = if let Value::Array(a) = request_value {
+        if let Some(Value::BulkString(command)) = a.get(0) {
+            let command = command.to_ascii_lowercase();
+            match command.as_str() {
+                "ping" => Value::SimpleString("PONG".to_string()),
+                "echo" => a
+                    .get(1..)
+                    .map(|args| args.first().unwrap().clone())
+                    .unwrap_or(Value::Error("no args to echo".to_string())),
+                "get" => {
+                    if let Some(Value::BulkString(k)) = a.get(1) {
+                        let db = db.lock().unwrap();
+                        db.get(k)
+                            .map(|res| Value::BulkString(res.to_string()))
+                            .unwrap_or(Value::Nil)
+                    } else {
+                        Value::Error("no key for get".to_string())
                     }
                 }
-                None => Value::Error("".to_string()),
-                _ => Value::Error("".to_string()),
+                "set" => {
+                    if let (Some(Value::BulkString(key)), Some(Value::BulkString(value))) =
+                        (a.get(1), a.get(2))
+                    {
+                        let mut db = db.lock().unwrap();
+                        db.insert(key.into(), value.into());
+                        Value::SimpleString("OK".to_string())
+                    } else {
+                        Value::Error("no key and value for set".into())
+                    }
+                }
+                _ => Value::Error("command not supported".to_string()),
             }
+        } else {
+            Value::Error("command is not bulk string".to_string())
         }
-        Value::BulkString(_) => Value::Error("".to_string()),
-        Value::Error(_) => Value::Error("".to_string()),
-        Value::Integer(_) => Value::Error("".to_string()),
-        Value::SimpleString(_) => Value::Error("".to_string()),
+    } else {
+        Value::Error("RESP transmitted is not array".to_string())
     };
 
     dbg!(&response_value);
@@ -81,6 +104,7 @@ enum Value {
     Error(String),
     Integer(String),
     SimpleString(String),
+    Nil,
 }
 
 impl Value {
@@ -92,25 +116,16 @@ impl Value {
 
     fn to_resp(&self) -> String {
         match self {
-            Value::Array(v) => {
-                let mut s = format!("*{}\r\n", v.len());
-                for u in v {
-                    s.push_str(&u.to_resp());
-                }
-                s
-            }
-            Value::BulkString(s) => {
-                format!("${}\r\n{}\r\n", s.len(), s)
-            }
-            Value::Error(s) => {
-                format!("-{}\r\n", s)
-            }
-            Value::Integer(s) => {
-                format!(":{}\r\n", s)
-            }
-            Value::SimpleString(s) => {
-                format!("+{}\r\n", s)
-            }
+            Value::Array(v) => format!(
+                "*{}\r\n{}",
+                v.len(),
+                v.iter().map(|u| u.to_resp()).collect::<String>()
+            ),
+            Value::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), s),
+            Value::Error(s) => format!("-{}\r\n", s),
+            Value::Integer(s) => format!(":{}\r\n", s),
+            Value::SimpleString(s) => format!("+{}\r\n", s),
+            Value::Nil => String::from("*-1\r\n"),
         }
     }
 }
@@ -120,9 +135,8 @@ fn parse(split: &mut Split<&str>) -> anyhow::Result<Value> {
 
     match resp.get(0..1) {
         Some("*") => {
-            let mut array_size = resp[1..].parse::<i64>().unwrap();
-
             let mut array = vec![];
+            let mut array_size = resp[1..].parse::<i64>().unwrap();
 
             while array_size > 0 {
                 array.push(parse(split)?);

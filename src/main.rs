@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-type Db = Arc<Mutex<HashMap<String, String>>>;
+type Db = Arc<Mutex<HashMap<String, Entry>>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -65,18 +65,49 @@ fn handle_resp(buf: &[u8], db: &Db) -> anyhow::Result<String> {
                     if let Some(Value::BulkString(k)) = a.get(1) {
                         let db = db.lock().unwrap();
                         db.get(k)
-                            .map(|res| Value::BulkString(res.to_string()))
+                            .map(|res| {
+                                let mut expired = false;
+                                if let Some(px) = res.px {
+                                    expired = res.inserted_at.elapsed().unwrap().as_millis() > px;
+                                }
+
+                                if expired {
+                                    Value::Nil
+                                } else {
+                                    Value::BulkString(res.value.to_string())
+                                }
+                            })
                             .unwrap_or(Value::Nil)
                     } else {
                         Value::Error("no key for get".to_string())
                     }
                 }
                 "set" => {
-                    if let (Some(Value::BulkString(key)), Some(Value::BulkString(value))) =
+                    let mut db = db.lock().unwrap();
+                    let mut entry = None;
+                    let mut px = None;
+
+                    if let (Some(Value::BulkString(k)), Some(Value::BulkString(v))) =
                         (a.get(1), a.get(2))
                     {
-                        let mut db = db.lock().unwrap();
-                        db.insert(key.into(), value.into());
+                        entry = Some((k.to_string(), v.to_string()));
+                    };
+
+                    if let (Some(Value::BulkString(_)), Some(Value::BulkString(v))) =
+                        (a.get(3), a.get(4))
+                    {
+                        px = Some(v.parse::<u128>().unwrap());
+                    };
+
+                    if let Some((k, v)) = entry {
+                        db.insert(
+                            k,
+                            Entry {
+                                value: v,
+                                inserted_at: std::time::SystemTime::now(),
+                                px,
+                            },
+                        );
                         Value::SimpleString("OK".to_string())
                     } else {
                         Value::Error("no key and value for set".into())
@@ -155,4 +186,10 @@ fn parse(split: &mut Split<&str>) -> anyhow::Result<Value> {
         Some(_) => Err(anyhow::anyhow!("Some(_)")),
         None => Err(anyhow::anyhow!("None")),
     }
+}
+
+struct Entry {
+    value: String,
+    inserted_at: std::time::SystemTime,
+    px: Option<u128>,
 }

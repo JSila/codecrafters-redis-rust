@@ -46,11 +46,11 @@ async fn handle_connection(mut stream: TcpStream, db: Db) -> anyhow::Result<()> 
 }
 
 fn handle_resp(buf: &[u8], db: &Db) -> anyhow::Result<String> {
-    dbg!(std::str::from_utf8(buf).unwrap());
+    // dbg!(std::str::from_utf8(buf).unwrap());
 
     let request_value = Value::parse(buf)?;
 
-    dbg!(&request_value);
+    // dbg!(&request_value);
 
     let response_value = if let Value::Array(a) = request_value {
         if let Some(Value::BulkString(command)) = a.get(0) {
@@ -122,8 +122,8 @@ fn handle_resp(buf: &[u8], db: &Db) -> anyhow::Result<String> {
         Value::Error("RESP transmitted is not array".to_string())
     };
 
-    dbg!(&response_value);
-    dbg!(&response_value.to_resp());
+    // dbg!(&response_value);
+    // dbg!(&response_value.to_resp());
 
     Ok(response_value.to_resp())
 }
